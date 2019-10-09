@@ -327,8 +327,8 @@ Next-Key Locks 包含 Record Locks和 Gap Locks，既锁记录，又锁间隙，
 ```sql
 --- Table Structure
 CREATE TABLE test.gap_t1 (
-	id int NOT NULL AUTO_INCREMENT,
-	num int null,
+	id varchar(30) NOT NULL,
+	num int not null,
 	PRIMARY KEY (`id`),
     KEY `idx_gap_t1_01` (`num`)
 )
@@ -337,10 +337,14 @@ DEFAULT CHARSET=utf8
 COLLATE=utf8_general_ci;
 
 --- Initial data
-insert into gap_t1(num) values(1);
-insert into gap_t1(num) values(3);
-insert into gap_t1(num) values(5);
-insert into gap_t1(num) values(7);
+insert into gap_t1(id,num) values('a', 1);
+insert into gap_t1(id,num) values('b', 3);
+insert into gap_t1(id,num) values('c', 5);
+insert into gap_t1(id,num) values('d', 7);
+insert into gap_t1(id,num) values('e', 10);
+insert into gap_t1(id,num) values('f', 11);
+insert into gap_t1(id,num) values('g', 12);
+insert into gap_t1(id,num) values('h', 14);
 ```
 
 接着在session1执行如下SQL:
