@@ -1,5 +1,6 @@
 在InnoDB中，锁的类型有如下几种：
 
+
 - Shared and Exclusive Locks(共享S或独占X锁)
 - Intention Locks(意向锁)
 - Record Locks(记录锁)
@@ -26,6 +27,7 @@ InnoDB实现了标准的行级锁(row-level locking)，其中有两种类型的�
 ---|---|---
 X  | N | N  
 S  | N | Y  
+
 
 
 注意普通的查询语句在InnoDB中属于快照读，不会加任何锁；如果查询加`lock in share mode`，那么会将查询出来的行加上**S锁**；如果查询加`for update`， 那么会将查询出来的行加上**X锁**。如下SQL所示：
@@ -73,8 +75,8 @@ mysql> select * from t1;
 
 \ | TX1 | TX2
 ---|---|---
-1 | begin; | begin; 
-2 | SELECT * FROM t1 WHERE i = 1 FOR UPDATE; |
+1 | BEGIN; | 
+2 | SELECT * FROM t1 WHERE i = 1 FOR UPDATE; | BEGIN;
 3 | |  UPDATE t1 SET name = 'WALKER1' WHERE i = 1;
 
 由上面的SQL语句执行情况来看，我们不难猜出TX2的`UPDATE t1 SET name = 'WALKER1';`更新语句必被阻塞住，下面来分析具体锁的情况。
@@ -306,21 +308,199 @@ Record Locks总是锁定索引记录，即使表没有定义索引。对于这�
 
 ## Gap Locks
 
+Gap Locks这个设计比较独特，如果对数据库理论比较清楚的同学，知道在SQL标准中`REPEATABLE READ`这个隔离级别会出现幻读(phantom row)，但MySQL在这个隔离级别下使用Next-Key lock 和 Gap lock的算法，避免幻读的产生。这个听着比较厉害，我们来了解下其概念。
+
+下面是MySQL官方文档的描述：
+> A gap lock is a lock on a gap between index records, or a lock on the gap before the first or after the last index record.
+
+Gap lock被称为间隙锁，锁定的是一个范围，而不是若干记录，可以形象地理解为行与行之间空隙。具体的加锁结合后面的Next-Key Locks来分析。
+
 ## Next-Key Locks
+
+下面是MySQL官方文档对Next-Key Locks的描述：
+
+> A next-key lock is a combination of a record lock on the index record and a gap lock on the gap before the index record.
+
+Next-Key Locks 包含 Record Locks和 Gap Locks，既锁记录，又锁间隙，那么锁定的区间的范围是多大呢？我们写个例子来看下吧：
+
+下面是表的DDL和初始化数据，字段`num`有非唯一索引。
+```sql
+--- Table Structure
+CREATE TABLE test.gap_t1 (
+	id int NOT NULL AUTO_INCREMENT,
+	num int null,
+	PRIMARY KEY (`id`),
+    KEY `idx_gap_t1_01` (`num`)
+)
+ENGINE=InnoDB
+DEFAULT CHARSET=utf8
+COLLATE=utf8_general_ci;
+
+--- Initial data
+insert into gap_t1(num) values(1);
+insert into gap_t1(num) values(3);
+insert into gap_t1(num) values(5);
+insert into gap_t1(num) values(7);
+```
+
+接着在session1执行如下SQL:
+
+```SQL
+BEGIN;
+SELECT * FROM gap_t1 WHERE num = 5 FOR UPDATE;
+```
+
+我们查看加锁情况：
+
+```
+select * from performance_schema.data_locks\G;
+```
+
+记录如下所示：
+
+```
+mysql> select * from performance_schema.data_locks\G
+*************************** 1. row ***************************
+               ENGINE: INNODB
+       ENGINE_LOCK_ID: 47001:1106
+ENGINE_TRANSACTION_ID: 47001
+            THREAD_ID: 56
+             EVENT_ID: 15
+        OBJECT_SCHEMA: test
+          OBJECT_NAME: gap_t1
+       PARTITION_NAME: NULL
+    SUBPARTITION_NAME: NULL
+           INDEX_NAME: NULL
+OBJECT_INSTANCE_BEGIN: 2126941013848
+            LOCK_TYPE: TABLE
+            LOCK_MODE: IX
+          LOCK_STATUS: GRANTED
+            LOCK_DATA: NULL
+*************************** 2. row ***************************
+               ENGINE: INNODB
+       ENGINE_LOCK_ID: 47001:46:5:4
+ENGINE_TRANSACTION_ID: 47001
+            THREAD_ID: 56
+             EVENT_ID: 15
+        OBJECT_SCHEMA: test
+          OBJECT_NAME: gap_t1
+       PARTITION_NAME: NULL
+    SUBPARTITION_NAME: NULL
+           INDEX_NAME: idx_gap_t1_01
+OBJECT_INSTANCE_BEGIN: 2126941011064
+            LOCK_TYPE: RECORD
+            LOCK_MODE: X
+          LOCK_STATUS: GRANTED
+            LOCK_DATA: 5, 'c'
+*************************** 3. row ***************************
+               ENGINE: INNODB
+       ENGINE_LOCK_ID: 47001:46:4:4
+ENGINE_TRANSACTION_ID: 47001
+            THREAD_ID: 56
+             EVENT_ID: 15
+        OBJECT_SCHEMA: test
+          OBJECT_NAME: gap_t1
+       PARTITION_NAME: NULL
+    SUBPARTITION_NAME: NULL
+           INDEX_NAME: PRIMARY
+OBJECT_INSTANCE_BEGIN: 2126941011408
+            LOCK_TYPE: RECORD
+            LOCK_MODE: X
+          LOCK_STATUS: GRANTED
+            LOCK_DATA: 'c'
+*************************** 4. row ***************************
+               ENGINE: INNODB
+       ENGINE_LOCK_ID: 47001:46:5:5
+ENGINE_TRANSACTION_ID: 47001
+            THREAD_ID: 56
+             EVENT_ID: 15
+        OBJECT_SCHEMA: test
+          OBJECT_NAME: gap_t1
+       PARTITION_NAME: NULL
+    SUBPARTITION_NAME: NULL
+           INDEX_NAME: idx_gap_t1_01
+OBJECT_INSTANCE_BEGIN: 2126941011752
+            LOCK_TYPE: RECORD
+            LOCK_MODE: X,GAP
+          LOCK_STATUS: GRANTED
+            LOCK_DATA: 7, 'd'
+4 rows in set (0.00 sec)
+```
+
+我们通过分析上面的Record locks的加锁情况，知道对于非唯一索引加X锁，必然会对其主键加锁，num为`5`的主键为`c`，所以第三行记录是对id为c的主键加锁；
+
+第二行是对num为5的记录加锁，加到了索引`idx_gap_t1_01`上了；
+
+第四行的LOCK_MODE为`X,GAP`，发现有两个，X锁和GAP锁，这个地方我们就发现了GAP锁的身影，此时就是Next-Key Locks了。
+
+
+我们来测试下Next-Key Locks锁住的区间到底是什么？有如下sql测试：
+
+```
+mysql> insert into gap_t1(id,num) values('m', 4);
+ERROR 1205 (HY000): Lock wait timeout exceeded; try restarting transaction
+
+mysql> insert into gap_t1(id,num) values('n', 3);
+ERROR 1205 (HY000): Lock wait timeout exceeded; try restarting transaction
+
+mysql> insert into gap_t1(id,num) values('n', 2);
+Query OK, 1 row affected (0.00 sec)
+
+mysql> insert into gap_t1(id,num) values('q', 7);
+Query OK, 1 row affected (0.00 sec)
+
+mysql> insert into gap_t1(id,num) values('y', 6);
+ERROR 1205 (HY000): Lock wait timeout exceeded; try restarting transaction
+```
+
+我们发现，当num为4,3,6的时候，都会被阻塞，num为2,7时，插入正常。注意原先的表数据如下：
+
+```
++----+-----+
+| id | num |
++----+-----+
+| a  |   1 |
+| b  |   3 |
+| c  |   5 |
+| d  |   7 |
+| e  |  10 |
+| f  |  11 |
+| g  |  12 |
+| h  |  14 |
++----+-----+
+```
+
+根据上面的测试情形来看，加锁的区间是：`[3,7)`，怎么变成了左闭右开了？在mysql官方文档上有这样一段话：
+
+> Suppose that an index contains the values 10, 11, 13, and 20. The possible next-key locks for this index cover the following intervals, where a round bracket denotes exclusion of the interval endpoint and a square bracket denotes inclusion of the endpoint:
+
+```
+(negative infinity, 10]
+(10, 11]
+(11, 13]
+(13, 20]
+(20, positive infinity)
+```
+加锁区间是左开右闭的，这是其SQL：`SELECT c1 FROM t WHERE c1 BETWEEN 10 and 20 FOR UPDATE;`
+
+看到这里，我有点不懂了。。。。。
 
 ## Insert Intention Locks
 
 ## AUTO-INC Locks
 
-参考：
+## References：
 
-- https://dev.mysql.com/doc/refman/8.0/en/innodb-locking.html
-- Deadlocks in InnoDB https://dev.mysql.com/doc/refman/5.6/en/innodb-deadlocks.html
-- How to Minimize and Handle Deadlocks https://dev.mysql.com/doc/refman/5.6/en/innodb-deadlocks-handling.html
+- InnoDB Locking https://dev.mysql.com/doc/refman/8.0/en/innodb-locking.html
+- Deadlocks in InnoDB https://dev.mysql.com/doc/refman/8.0/en/innodb-deadlocks.html
+- Phantom Rows https://dev.mysql.com/doc/refman/8.0/en/innodb-next-key-locking.html
+- How to Minimize and Handle Deadlocks https://dev.mysql.com/doc/refman/8.0/en/innodb-deadlocks-handling.html
 - START TRANSACTION, COMMIT, and ROLLBACK Syntax https://dev.mysql.com/doc/refman/8.0/en/commit.html
 - DeadLock Examples https://github.com/aneasystone/mysql-deadlocks
 - MySQL 死锁与日志二三事 https://www.cnblogs.com/cnsanshao/p/7252825.html
 - InnoDB 的意向锁有什么作用？ https://www.zhihu.com/question/51513268
 - Mysql死锁分析案例（一）https://www.cnblogs.com/chenshouchang/p/11266138.html
 - 一个最不可思议的MySQL死锁分析 http://hedengcheng.com/?p=844
-
+- 深入了解mysql--gap locks,Next-Key Locks https://www.cnblogs.com/chongaizhen/p/11168442.html
+- https://segmentfault.com/a/1190000018730103?utm_source=tag-newest
+- Innodb中的事务隔离级别和锁的关系 https://tech.meituan.com/2014/08/20/innodb-lock.html
