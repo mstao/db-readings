@@ -323,7 +323,7 @@ Gap lock被称为间隙锁，锁定的是一个范围，而不是若干记录，
 
 Next-Key Locks 包含 Record Locks和 Gap Locks，既锁记录，又锁间隙，那么锁定的区间的范围是多大呢？我们写个例子来看下吧：
 
-下面是表的DDL和初始化数据，字段`num`有非唯一索引。
+下面是表的DDL和初始化数据，事务隔离级别为RR，字段`num`有非唯一索引。
 ```sql
 --- Table Structure
 CREATE TABLE test.gap_t1 (
