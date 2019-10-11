@@ -259,7 +259,7 @@ OBJECT_INSTANCE_BEGIN: 2671434670328
 居然有六条记录，注意后四条都是事务44297的，我只给`i = 1`的记录加了X锁，为什么有三条[4,5,6]X锁（LOCK_TYPE为RECORD）？注意有三条X锁的记录`LOCK_DATA`字段数据是不同的，
 原因是字段i并没有添加索引，所以MySQL就利用聚簇索引（Cluster Index）来加锁了，所以两条记录都被上了X锁，第三条记录的`LOCK_DATA`是 `supremum pseudo-record`，这个是啥玩意？这个和后面说到的`Next-Key Locks`有关，这个先暂放不表。
 
-我们注意第三条记录的LOCK_MODE为IX，且LOCK_TYPE为TABLE，说明这是个表级锁，且是意向写锁，由上表可知，IX锁与IX锁是相容的，所以可以看到，第一条记录的IX锁的状态也是GRANTED的。
+我们注意第三条记录的LOCK_MODE为IX（LOCK_MODE可取值：S[,GAP], X[,GAP], IS[,GAP], IX[,GAP], AUTO_INC, and UNKNOWN. ），且LOCK_TYPE为TABLE，说明这是个表级锁，且是意向写锁，由上表可知，IX锁与IX锁是相容的，所以可以看到，第一条记录的IX锁的状态也是GRANTED的。
 
 再看第二条纪录，LOCK_TYPE为RECORD，LOCK_MODE为X， LOCK_STATUS为WAITING，说明被阻塞了，等待其他事务释放锁。
 
@@ -535,9 +535,136 @@ mysql> select * from gap_t1;
 
 ## Insert Intention Locks
 
+下面是MySQL官方文档对Insert Intention Locks的描述：
+> An insert intention lock is a type of gap lock set by INSERT operations prior to row insertion. 
 
+从这一句话我们可以知道，Insert Intention Locks是一种`gap lock`，并且是在插入（insert）操作之前发生的，该锁的范围是(插入值, 向下的一个索引值)。不过在data_locks这个表中无法确切找到这个锁的踪迹，我们可以从MySQL的日志来查看。
+
+下面是官方给的例子：
+
+首先初始化表和数据
+```
+CREATE TABLE child (id int(11) NOT NULL, PRIMARY KEY(id)) ENGINE=InnoDB;
+INSERT INTO child (id) values (90),(102);
+```
+
+接着开启两个session：
+
+\ | TX1 | TX2
+---|---|---
+1 | BEGIN; | 
+2 | SELECT * FROM child WHERE id > 100 FOR UPDATE; | BEGIN;
+3 | |  INSERT INTO child (id) VALUES (101);
+
+当TX2执行到3的时候，插入语句被阻塞了，下面我们来看看data_locks表中锁的情况:
+
+```
+mysql> select * from performance_schema.data_locks\G;
+*************************** 1. row ***************************
+               ENGINE: INNODB
+       ENGINE_LOCK_ID: 47456:1109
+ENGINE_TRANSACTION_ID: 47456
+            THREAD_ID: 55
+             EVENT_ID: 8
+        OBJECT_SCHEMA: test
+          OBJECT_NAME: child
+       PARTITION_NAME: NULL
+    SUBPARTITION_NAME: NULL
+           INDEX_NAME: NULL
+OBJECT_INSTANCE_BEGIN: 2611622478280
+            LOCK_TYPE: TABLE
+            LOCK_MODE: IX
+          LOCK_STATUS: GRANTED
+            LOCK_DATA: NULL
+*************************** 2. row ***************************
+               ENGINE: INNODB
+       ENGINE_LOCK_ID: 47456:49:4:3
+ENGINE_TRANSACTION_ID: 47456
+            THREAD_ID: 55
+             EVENT_ID: 8
+        OBJECT_SCHEMA: test
+          OBJECT_NAME: child
+       PARTITION_NAME: NULL
+    SUBPARTITION_NAME: NULL
+           INDEX_NAME: PRIMARY
+OBJECT_INSTANCE_BEGIN: 2611622475496
+            LOCK_TYPE: RECORD
+            LOCK_MODE: X,GAP
+          LOCK_STATUS: WAITING
+            LOCK_DATA: 102
+*************************** 3. row ***************************
+               ENGINE: INNODB
+       ENGINE_LOCK_ID: 47454:1109
+ENGINE_TRANSACTION_ID: 47454
+            THREAD_ID: 54
+             EVENT_ID: 7
+        OBJECT_SCHEMA: test
+          OBJECT_NAME: child
+       PARTITION_NAME: NULL
+    SUBPARTITION_NAME: NULL
+           INDEX_NAME: NULL
+OBJECT_INSTANCE_BEGIN: 2611622473304
+            LOCK_TYPE: TABLE
+            LOCK_MODE: IX
+          LOCK_STATUS: GRANTED
+            LOCK_DATA: NULL
+*************************** 4. row ***************************
+               ENGINE: INNODB
+       ENGINE_LOCK_ID: 47454:49:4:1
+ENGINE_TRANSACTION_ID: 47454
+            THREAD_ID: 54
+             EVENT_ID: 7
+        OBJECT_SCHEMA: test
+          OBJECT_NAME: child
+       PARTITION_NAME: NULL
+    SUBPARTITION_NAME: NULL
+           INDEX_NAME: PRIMARY
+OBJECT_INSTANCE_BEGIN: 2611622470520
+            LOCK_TYPE: RECORD
+            LOCK_MODE: X
+          LOCK_STATUS: GRANTED
+            LOCK_DATA: supremum pseudo-record
+*************************** 5. row ***************************
+               ENGINE: INNODB
+       ENGINE_LOCK_ID: 47454:49:4:3
+ENGINE_TRANSACTION_ID: 47454
+            THREAD_ID: 54
+             EVENT_ID: 7
+        OBJECT_SCHEMA: test
+          OBJECT_NAME: child
+       PARTITION_NAME: NULL
+    SUBPARTITION_NAME: NULL
+           INDEX_NAME: PRIMARY
+OBJECT_INSTANCE_BEGIN: 2611622470520
+            LOCK_TYPE: RECORD
+            LOCK_MODE: X
+          LOCK_STATUS: GRANTED
+            LOCK_DATA: 102
+5 rows in set (0.00 sec)
+```
+
+我们可以看到第五行`102`被加了X锁，第四行LOCK_DATA是`supremum pseudo-record`，这是个什么玩意，来看下官方的解释：
+
+> For the last interval, the next-key lock locks the gap above the largest value in the index and the “supremum” pseudo-record having a value higher than any value actually in the index. The supremum is not a real index record, so, in effect, this next-key lock locks only the gap following the largest index value.
+
+由于我们的加锁语句是`SELECT * FROM child WHERE id > 100 FOR UPDATE;`，条件是一个范围，没有边界，MySQL就会加`supremum pseudo-record`。它是索引中的伪记录(pseudo-record)，代表此索引中可能存在的最大值，设置在supremum pseudo-record上的next-key lock锁定了“此索引中可能存在的最大值”，以及这个值前面的间隙，“此索引中可能存在的最大值”在索引中是不存在的，因此，该next-keylock实际上锁定了“此索引中可能存在的最大值”前面的间隙，也就是此索引中当前实际存在的最大值后面的间隙。
+
+第五行数据，给102加了X,GAP 两个锁，经过上面的分析，我们可以感觉到，其实这个GAP应该是插入意向锁，我们用`SHOW ENGINE INNODB STATUS`来看看InnoDB此时到底加了什么锁？下面是部分输出：
+
+```
+RECORD LOCKS space id 49 page no 4 n bits 72 index PRIMARY of table `test`.`child` trx id 47455 lock_mode X locks gap before rec insert intention waiting
+Record lock, heap no 3 PHYSICAL RECORD: n_fields 3; compact format; info bits 0
+ 0: len 4; hex 80000066; asc    f;;
+ 1: len 6; hex 00000000b959; asc      Y;;
+ 2: len 7; hex 8200000093011d; asc        ;;
+```
+
+`lock_mode X locks gap before rec insert intention waiting` 这句话告诉我们，此时确实产生了插入意向锁，我们插入的是101，其下一个索引值为102，所以会有插入意向锁。
 
 ## AUTO-INC Locks
+
+AUTO-INC锁是一种特殊的表级锁，通过事务插入到具有AUTO_INCREMENT列的表中来实现。在最简单的情况下，如果一个事务正在向表中插入值，那么任何其他事务都必须等待自己的插入操作，以便由第一个事务插入的行接收连续的主键值。
+innodb_autoinc_lock_mode配置选项控制用于自动增量锁定的算法。它允许您选择如何在可预测的自动递增值序列和插入操作的最大并发性之间进行权衡。
 
 ## References：
 
@@ -556,4 +683,3 @@ mysql> select * from gap_t1;
 - Innodb中的事务隔离级别和锁的关系 https://tech.meituan.com/2014/08/20/innodb-lock.html
 - MySQL · 引擎特性 · B+树并发控制机制的前世今生 http://mysql.taobao.org/monthly/2018/09/01/#
 - 图解MySQL索引--B-Tree（B+Tree） https://www.cnblogs.com/liqiangchn/p/9060521.html
-- https://blog.csdn.net/u013360850/article/details/86030084
