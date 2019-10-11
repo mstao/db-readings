@@ -10,6 +10,7 @@ The articles and documents I read about databases
 - SET TRANSACTION Syntax https://dev.mysql.com/doc/refman/8.0/en/set-transaction.html
 - Transaction Isolation Levels https://dev.mysql.com/doc/refman/8.0/en/innodb-transaction-isolation-levels.html
 - START TRANSACTION, COMMIT, and ROLLBACK Syntax https://dev.mysql.com/doc/refman/8.0/en/commit.html
+-  InnoDB Locking https://dev.mysql.com/doc/refman/8.0/en/innodb-locking.html
 
 ## Deadlocks
 
