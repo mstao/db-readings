@@ -321,7 +321,9 @@ Gap lock被称为间隙锁，锁定的是一个范围，而不是若干记录，
 
 > A next-key lock is a combination of a record lock on the index record and a gap lock on the gap before the index record.
 
-Next-Key Locks 包含 Record Locks和 Gap Locks，既锁记录，又锁间隙，那么锁定的区间的范围是多大呢？我们写个例子来看下吧：
+Next-Key Locks 包含 Record Locks和 Gap Locks，既锁记录，又锁间隙。注意Next-key Lock只在RR级别有效，在RC级别下，只用于外键检查（foreign-key constraint checking）和重复键检查（duplicate-key checking）。
+
+那么锁定的区间的范围是多大呢？我们写个例子来看下吧：
 
 下面是表的DDL和初始化数据，事务隔离级别为RR，字段`num`有非唯一索引。
 ```sql
@@ -337,14 +339,14 @@ DEFAULT CHARSET=utf8
 COLLATE=utf8_general_ci;
 
 --- Initial data
-insert into gap_t1(id,num) values('a', 1);
-insert into gap_t1(id,num) values('b', 3);
-insert into gap_t1(id,num) values('c', 5);
-insert into gap_t1(id,num) values('d', 7);
-insert into gap_t1(id,num) values('e', 10);
-insert into gap_t1(id,num) values('f', 11);
-insert into gap_t1(id,num) values('g', 12);
-insert into gap_t1(id,num) values('h', 14);
+insert into gap_t1(id,num) values('a', 1),
+('c', 3),
+('e', 5),
+('g', 7),
+('i', 10),
+('k', 11),
+('m', 12),
+('p', 14);
 ```
 
 接着在session1执行如下SQL:
@@ -363,71 +365,71 @@ select * from performance_schema.data_locks\G;
 记录如下所示：
 
 ```
-mysql> select * from performance_schema.data_locks\G
+mysql> select * from performance_schema.data_locks\G;
 *************************** 1. row ***************************
                ENGINE: INNODB
-       ENGINE_LOCK_ID: 47001:1106
-ENGINE_TRANSACTION_ID: 47001
-            THREAD_ID: 56
-             EVENT_ID: 15
+       ENGINE_LOCK_ID: 47438:1108
+ENGINE_TRANSACTION_ID: 47438
+            THREAD_ID: 50
+             EVENT_ID: 7
         OBJECT_SCHEMA: test
           OBJECT_NAME: gap_t1
        PARTITION_NAME: NULL
     SUBPARTITION_NAME: NULL
            INDEX_NAME: NULL
-OBJECT_INSTANCE_BEGIN: 2126941013848
+OBJECT_INSTANCE_BEGIN: 2611622473304
             LOCK_TYPE: TABLE
             LOCK_MODE: IX
           LOCK_STATUS: GRANTED
             LOCK_DATA: NULL
 *************************** 2. row ***************************
                ENGINE: INNODB
-       ENGINE_LOCK_ID: 47001:46:5:4
-ENGINE_TRANSACTION_ID: 47001
-            THREAD_ID: 56
-             EVENT_ID: 15
+       ENGINE_LOCK_ID: 47438:48:5:4
+ENGINE_TRANSACTION_ID: 47438
+            THREAD_ID: 50
+             EVENT_ID: 7
         OBJECT_SCHEMA: test
           OBJECT_NAME: gap_t1
        PARTITION_NAME: NULL
     SUBPARTITION_NAME: NULL
            INDEX_NAME: idx_gap_t1_01
-OBJECT_INSTANCE_BEGIN: 2126941011064
+OBJECT_INSTANCE_BEGIN: 2611622470520
             LOCK_TYPE: RECORD
             LOCK_MODE: X
           LOCK_STATUS: GRANTED
-            LOCK_DATA: 5, 'c'
+            LOCK_DATA: 5, 'e'
 *************************** 3. row ***************************
                ENGINE: INNODB
-       ENGINE_LOCK_ID: 47001:46:4:4
-ENGINE_TRANSACTION_ID: 47001
-            THREAD_ID: 56
-             EVENT_ID: 15
+       ENGINE_LOCK_ID: 47438:48:4:4
+ENGINE_TRANSACTION_ID: 47438
+            THREAD_ID: 50
+             EVENT_ID: 7
         OBJECT_SCHEMA: test
           OBJECT_NAME: gap_t1
        PARTITION_NAME: NULL
     SUBPARTITION_NAME: NULL
            INDEX_NAME: PRIMARY
-OBJECT_INSTANCE_BEGIN: 2126941011408
+OBJECT_INSTANCE_BEGIN: 2611622470864
             LOCK_TYPE: RECORD
             LOCK_MODE: X
           LOCK_STATUS: GRANTED
-            LOCK_DATA: 'c'
+            LOCK_DATA: 'e'
 *************************** 4. row ***************************
                ENGINE: INNODB
-       ENGINE_LOCK_ID: 47001:46:5:5
-ENGINE_TRANSACTION_ID: 47001
-            THREAD_ID: 56
-             EVENT_ID: 15
+       ENGINE_LOCK_ID: 47438:48:5:5
+ENGINE_TRANSACTION_ID: 47438
+            THREAD_ID: 50
+             EVENT_ID: 7
         OBJECT_SCHEMA: test
           OBJECT_NAME: gap_t1
        PARTITION_NAME: NULL
     SUBPARTITION_NAME: NULL
            INDEX_NAME: idx_gap_t1_01
-OBJECT_INSTANCE_BEGIN: 2126941011752
+OBJECT_INSTANCE_BEGIN: 2611622471208
             LOCK_TYPE: RECORD
             LOCK_MODE: X,GAP
           LOCK_STATUS: GRANTED
-            LOCK_DATA: 7, 'd'
+            LOCK_DATA: 7, 'g'
 4 rows in set (0.00 sec)
 ```
 
@@ -441,55 +443,99 @@ OBJECT_INSTANCE_BEGIN: 2126941011752
 我们来测试下Next-Key Locks锁住的区间到底是什么？有如下sql测试：
 
 ```
-mysql> insert into gap_t1(id,num) values('m', 4);
+insert into gap_t1(id,num) values('d', 3);
+insert into gap_t1(id,num) values('d', 4);
+insert into gap_t1(id,num) values('b', 3);
+insert into gap_t1(id,num) values('f', 7);
+insert into gap_t1(id,num) values('h', 7);
+insert into gap_t1(id,num) values('d', 5);
+insert into gap_t1(id,num) values('f', 5);
+```
+
+```
+mysql> insert into gap_t1(id,num) values('d', 3);
 ERROR 1205 (HY000): Lock wait timeout exceeded; try restarting transaction
 
-mysql> insert into gap_t1(id,num) values('n', 3);
+mysql> insert into gap_t1(id,num) values('d', 4);
 ERROR 1205 (HY000): Lock wait timeout exceeded; try restarting transaction
 
-mysql> insert into gap_t1(id,num) values('n', 2);
+mysql> insert into gap_t1(id,num) values('b', 3);
+Query OK, 1 row affected (0.01 sec)
+
+mysql> insert into gap_t1(id,num) values('f', 7);
+ERROR 1205 (HY000): Lock wait timeout exceeded; try restarting transaction
+
+mysql> insert into gap_t1(id,num) values('h', 7);
 Query OK, 1 row affected (0.00 sec)
 
-mysql> insert into gap_t1(id,num) values('q', 7);
-Query OK, 1 row affected (0.00 sec)
+mysql> insert into gap_t1(id,num) values('d', 5);
+ERROR 1205 (HY000): Lock wait timeout exceeded; try restarting transaction
 
-mysql> insert into gap_t1(id,num) values('y', 6);
+mysql> insert into gap_t1(id,num) values('f', 5);
 ERROR 1205 (HY000): Lock wait timeout exceeded; try restarting transaction
 ```
 
-我们发现，当num为4,3,6的时候，都会被阻塞，num为2,7时，插入正常。注意原先的表数据如下：
+我们发现，当`(id,num)`为`('d',3)`, `('d', 4)`,`('f', 7)`,`('d', 5)`,`('f', 5)`的时候，都会被阻塞，`(id,num)`为`('b', 3)`,`('h', 7)`时，插入正常。注意原先的表数据如下：
 
 ```
+mysql> select * from gap_t1;
++----+-----+
+| id | num |
++----+-----+
+| a  |   1 |
+| c  |   3 |
+| e  |   5 |
+| g  |   7 |
+| i  |  10 |
+| k  |  11 |
+| m  |  12 |
+| p  |  14 |
++----+-----+
+8 rows in set (0.00 sec)
+```
+
+执行完上面的插入语句后，变成如下的：
+
+```
+mysql> select * from gap_t1;
 +----+-----+
 | id | num |
 +----+-----+
 | a  |   1 |
 | b  |   3 |
-| c  |   5 |
-| d  |   7 |
-| e  |  10 |
-| f  |  11 |
-| g  |  12 |
-| h  |  14 |
+| c  |   3 |
+| e  |   5 |
+| g  |   7 |
+| h  |   7 |
+| i  |  10 |
+| k  |  11 |
+| m  |  12 |
+| p  |  14 |
 +----+-----+
+10 rows in set (0.00 sec)
 ```
 
-根据上面的测试情形来看，加锁的区间是：`[3,7)`，怎么变成了左闭右开了？在mysql官方文档上有这样一段话：
-
-> Suppose that an index contains the values 10, 11, 13, and 20. The possible next-key locks for this index cover the following intervals, where a round bracket denotes exclusion of the interval endpoint and a square bracket denotes inclusion of the endpoint:
+根据上面的测试情形来看，加锁的区间是：
 
 ```
-(negative infinity, 10]
-(10, 11]
-(11, 13]
-(13, 20]
-(20, positive infinity)
+(3,5]
+(5, 7)
 ```
-加锁区间是左开右闭的，这是其SQL：`SELECT c1 FROM t WHERE c1 BETWEEN 10 and 20 FOR UPDATE;`
+我们来画图看一下：
 
-看到这里，我有点不懂了。。。。。
+![image](https://github.com/mstao/db-readings/blob/master/img/next-key-lock.png?raw=true)
+
+结合上面data_locks表查询结果可知：
+- `(a,5)`这条记录加的是Record Lock，并且该行的主键索引与非聚集索引均加了Record Lock
+- `(a,5)`的左右区间均被加了Gap Lock
+- 对于唯一索引（包括聚集索引），如果命中的话，锁就会降级为Record Lock，不再有Gap Lock了。（索引上的等值查询，给唯一索引加锁的时候，next-key lock会退化为行锁）
+- 引上的等值查询，向右遍历时且最后一个值不满足等值条件的时候，next-key lock 退化为间隙锁。
+
+更细节的部分后面专门写文章研究，这里就对Next-key lock了解这么多吧。
 
 ## Insert Intention Locks
+
+
 
 ## AUTO-INC Locks
 
@@ -508,3 +554,6 @@ ERROR 1205 (HY000): Lock wait timeout exceeded; try restarting transaction
 - 深入了解mysql--gap locks,Next-Key Locks https://www.cnblogs.com/chongaizhen/p/11168442.html
 - https://segmentfault.com/a/1190000018730103?utm_source=tag-newest
 - Innodb中的事务隔离级别和锁的关系 https://tech.meituan.com/2014/08/20/innodb-lock.html
+- MySQL · 引擎特性 · B+树并发控制机制的前世今生 http://mysql.taobao.org/monthly/2018/09/01/#
+- 图解MySQL索引--B-Tree（B+Tree） https://www.cnblogs.com/liqiangchn/p/9060521.html
+- https://blog.csdn.net/u013360850/article/details/86030084
